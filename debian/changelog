@@ -1,3 +1,10 @@
+ilia (0.18.1) jammy; urgency=medium
+
+  [ Carlos Fernandez Sanz ]
+  * fix(files): load tinysparql or tracker-sparql at run time
+
+ -- Regolith Linux <regolith.linux@gmail.com>  Mon, 26 Oct 2026 19:55:27 +0000
+
 ilia (0.18.0) jammy; urgency=medium
 
   [ Jesse Hallett ]
