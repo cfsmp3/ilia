@@ -35,6 +35,158 @@ void test_line_reader() {
     }
 }
 
+// Reads data with the reader's limits; the lines given, joined with |
+string read_limited(string data, size_t chunk_size, size_t max_line_length, uint max_lines, uint64 max_bytes,
+                    out uint long_lines, out bool limit_reached) {
+    string[] lines = {};
+    var reader = new Ilia.LineReader(new MemoryInputStream.from_data(data.data), chunk_size);
+    reader.max_line_length = max_line_length;
+    reader.max_lines = max_lines;
+    reader.max_bytes = max_bytes;
+    reader.io_priority = Priority.LOW;
+    reader.lines_read.connect((batch) => {
+        foreach (var line in batch) lines += line;
+    });
+    int finished = 0;
+    reader.finished.connect(() => finished++);
+    uint dropped = 0;
+    reader.long_line_dropped.connect(() => {
+        dropped++;
+        // Said as each line is dropped, not only at the end
+        assert (finished == 0 && reader.long_lines == dropped);
+    });
+    var loop = new MainLoop();
+    reader.read_all.begin((obj, res) => {
+        reader.read_all.end(res);
+        loop.quit();
+    });
+    loop.run();
+    assert (finished == 1 && reader.done && dropped == reader.long_lines);
+    long_lines = reader.long_lines;
+    limit_reached = reader.limit_reached;
+    return string.joinv("|", lines);
+}
+
+// Lines longer than the limit are left out, whatever the chunk boundaries; the others are kept whole
+void test_line_reader_long_lines() {
+    uint long_lines;
+    bool limit_reached;
+    foreach (size_t chunk in new size_t[] { 1, 2, 3, 5, 64 * 1024 }) {
+        assert (read_limited("abcd\nabcde\nab\nabcdefghij\nxyz", chunk, 4, 0, 0, out long_lines, out limit_reached) == "abcd|ab|xyz");
+        assert (long_lines == 2 && !limit_reached);
+        // A last line without '\n' is measured too
+        assert (read_limited("ok\ntoo long", chunk, 4, 0, 0, out long_lines, out limit_reached) == "ok");
+        assert (long_lines == 1);
+        // Multi-byte characters count in bytes
+        assert (read_limited("éé\néée\n", chunk, 4, 0, 0, out long_lines, out limit_reached) == "éé");
+        assert (long_lines == 1);
+    }
+}
+
+// Reading stops after max_lines lines (those left out count) or max_bytes bytes; a line cut off is left out
+void test_line_reader_stops_at_limits() {
+    uint long_lines;
+    bool limit_reached;
+    foreach (size_t chunk in new size_t[] { 1, 3, 64 * 1024 }) {
+        assert (read_limited("a\nb\nc\nd\n", chunk, 0, 2, 0, out long_lines, out limit_reached) == "a|b");
+        assert (limit_reached);
+        assert (read_limited("a\nlong\nc\nd\n", chunk, 2, 3, 0, out long_lines, out limit_reached) == "a|c");
+        assert (limit_reached && long_lines == 1);
+        // Exactly max_lines lines: nothing is left out, and the limit is not reached
+        assert (read_limited("a\nb\n", chunk, 0, 2, 0, out long_lines, out limit_reached) == "a|b");
+        assert (!limit_reached);
+        assert (read_limited("a\nb", chunk, 0, 3, 0, out long_lines, out limit_reached) == "a|b");
+        assert (!limit_reached);
+
+        // 7 bytes: "ab\ncd\ne" is read, and "e" is cut off
+        assert (read_limited("ab\ncd\nef\n", chunk, 0, 0, 7, out long_lines, out limit_reached) == "ab|cd");
+        assert (limit_reached);
+        // A stream of exactly max_bytes is read whole, its last line too
+        assert (read_limited("ab\ncd", chunk, 0, 0, 5, out long_lines, out limit_reached) == "ab|cd");
+        assert (!limit_reached);
+    }
+}
+
+// An endless stream (like yes): reading stops at the line limit
+void test_line_reader_endless_stream() {
+    var stream = new EndlessStream("y\n");
+    var reader = new Ilia.LineReader(stream, 4096);
+    reader.max_lines = 100000;
+    int count = 0;
+    reader.lines_read.connect((batch) => count += batch.length);
+    var loop = new MainLoop();
+    reader.read_all.begin((obj, res) => {
+        reader.read_all.end(res);
+        loop.quit();
+    });
+    loop.run();
+    assert (count == 100000 && reader.limit_reached);
+
+    // One endless line (like cat /dev/zero): said to be too long at once, then reading stops at the byte limit
+    reader = new Ilia.LineReader(new EndlessStream("x"), 4096);
+    reader.max_line_length = 64;
+    reader.max_bytes = 1024 * 1024;
+    count = 0;
+    int dropped = 0;
+    reader.lines_read.connect((batch) => count += batch.length);
+    reader.long_line_dropped.connect(() => dropped++);
+    loop = new MainLoop();
+    reader.read_all.begin((obj, res) => {
+        reader.read_all.end(res);
+        loop.quit();
+    });
+    loop.run();
+    assert (count == 0 && dropped == 1 && reader.long_lines == 1 && reader.limit_reached);
+}
+
+// stop() while a read is pending ends reading at once, with finished
+void test_line_reader_stop() {
+    // A pipe that is never written to or closed: the read waits
+    int fds[2];
+    assert (Posix.pipe(fds) == 0);
+    var reader = new Ilia.LineReader(new UnixInputStream(fds[0], true));
+    bool finished = false;
+    reader.finished.connect(() => finished = true);
+    var loop = new MainLoop();
+    reader.read_all.begin((obj, res) => {
+        reader.read_all.end(res);
+        loop.quit();
+    });
+    Timeout.add(50, () => {
+        reader.stop();
+        return false;
+    });
+    Timeout.add_seconds(5, () => {
+        loop.quit();
+        return false;
+    });
+    loop.run();
+    assert (finished && reader.done && !reader.limit_reached);
+    Posix.close(fds[1]);
+}
+
+// An input stream that repeats its text forever
+class EndlessStream : InputStream {
+    private uint8[] text;
+    private int position = 0;
+
+    public EndlessStream (string text) {
+        this.text = text.data;
+    }
+
+    public override ssize_t read(uint8[] buffer, Cancellable ? cancellable = null) throws IOError {
+        for (int i = 0; i < buffer.length; ++i) {
+            buffer[i] = text[position];
+            position = (position + 1) % text.length;
+        }
+        return buffer.length;
+    }
+
+    public override bool close(Cancellable ? cancellable = null) throws IOError {
+        return true;
+    }
+}
+
 // The words used for filtering many rows give the same answer as matches_all_words()
 void test_contains_all_words_matches_matches_all_words() {
     string[] fields = { "foo bar baz", "Foo --Baz", "Capture d'écran", "", "ÉCRAN", "tab\there" };
@@ -361,6 +513,10 @@ public int main(string[] args) {
     Test.init(ref args);
 
     Test.add_func("/textlist/line_reader", test_line_reader);
+    Test.add_func("/textlist/line_reader_long_lines", test_line_reader_long_lines);
+    Test.add_func("/textlist/line_reader_stops_at_limits", test_line_reader_stops_at_limits);
+    Test.add_func("/textlist/line_reader_endless_stream", test_line_reader_endless_stream);
+    Test.add_func("/textlist/line_reader_stop", test_line_reader_stop);
     Test.add_func("/textlist/contains_all_words", test_contains_all_words_matches_matches_all_words);
     Test.add_func("/textlist/filter_equivalence", test_filter_equivalence);
     Test.add_func("/textlist/responsiveness_bound", test_responsiveness_bound);

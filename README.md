@@ -83,12 +83,14 @@ The keys of the `[Ilia Page]` group:
 - Exactly one of:
   - `Apps`: desktop file IDs, listed in the order given. Choosing one launches it as the Applications page does; entries that are not installed or not shown on this desktop are left out.
   - `Items`: lines of text, separated by `;`.
-  - `ItemsCommand`: a shell command, each line it prints is a row. It runs when the page is first shown, rows appear as they are printed, and it is stopped when Ilia closes.
+  - `ItemsCommand`: a shell command, each line it prints is a row. It runs when the page is first shown, with standard input from `/dev/null`; rows appear as they are printed, and the window keeps working while it runs. When Ilia closes, the command and what it started get SIGTERM. The command runs each time Ilia shows the page, so a slow one should keep its own cache. Ilia reads at most 1,000,000 lines or 64 MiB of its output, leaves out lines longer than 64 KiB, and stops the command once past a limit. The rows printed by a command that fails stay; a status other than 0, and the limits reached, are reported on standard error.
 - `Exec`: for `Items` and `ItemsCommand`, the command that choosing a row runs, with each `%s` replaced by the row's value as one argument (`%%` is a `%`; without `%s` the value is added as the last argument). The command is not run by a shell. Without `Exec`, the value is printed, as with `textlist`.
 - `Sort=frequency`: for `Items` and `ItemsCommand`, the rows chosen most often come first. Choices are recorded as `<name>#<value>` in the `app-launch-counts` setting, the launch history the Applications page ranks by, which keeps the latest 32 launches.
 - `OnlyShowIn`, `NotShowIn`: window managers the page is or is not shown under: `i3`, `sway`, or `other` for any other.
 
 A row of `Items` or `ItemsCommand` may be `label<tab>value`: the label is shown and searched, and choosing the row uses the value (in a key file, a tab is written `\t`).
+Blank rows are left out, and so are rows of `ItemsCommand` that repeat an earlier row (label and value alike); `Items` are shown as written, repeats included.
+Bytes that are not UTF-8 are shown as `�` in the label, and the value is used as it was printed; text after a NUL byte is ignored.
 Rows are matched as on the other pages, following the `fuzzy-matching` setting; rows of `Apps` are matched as on the Applications page, following `match-fields` too, but keep their order.
 Files that cannot be used are reported on standard error and skipped.
 

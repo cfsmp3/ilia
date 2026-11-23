@@ -124,11 +124,88 @@ void test_split_row() {
 
     assert (!Ilia.PageFile.split_row("\t", out label, out value));
     assert (!Ilia.PageFile.split_row("", out label, out value));
+
+    // Blank space counts as nothing; text inside the row keeps its spaces
+    assert (!Ilia.PageFile.split_row("   ", out label, out value));
+    assert (!Ilia.PageFile.split_row(" \t  ", out label, out value));
+    assert (Ilia.PageFile.split_row("  \tvalue", out label, out value));
+    assert (label == "value" && value == "value");
+    assert (Ilia.PageFile.split_row("Label\t  ", out label, out value));
+    assert (label == "Label" && value == "Label");
+    assert (Ilia.PageFile.split_row("  spaced  ", out label, out value));
+    assert (label == "  spaced  " && value == "  spaced  ");
+}
+
+// A string of the bytes, which need not be UTF-8
+string from_bytes(uint8[] bytes) {
+    var text = new StringBuilder();
+    foreach (uint8 b in bytes)
+        text.append_c((char) b);
+    return text.str;
+}
+
+// Rows as a page shows them: blank and repeated rows left out, labels made valid UTF-8, values kept
+void test_read_row() {
+    var seen = new GenericSet<string>(str_hash, str_equal);
+    string[] shown = {};
+    string[] lines = { "alpha", "beta", "alpha", "", "  ", "Label\tv1", "Label\tv2", "Other\tv1", "Label\tv1",
+                       // the same text, split in different places, is not a repeat
+                       "b\tc\td", "b\tc\td", "\tb\tc\td" };
+    foreach (unowned string line in lines) {
+        string label, value;
+        if (Ilia.PageFile.read_row(line, seen, out label, out value))
+            shown += label + "=" + value;
+    }
+    assert (string.joinv("|", shown) == "alpha=alpha|beta=beta|Label=v1|Label=v2|Other=v1|b=c\td|b\tc\td=b\tc\td");
+
+    // Without a set (the Items of a file) repeats stay; blank rows are still left out
+    shown = {};
+    foreach (unowned string line in new string[] { "dup", "dup", "  ", " spaced ", "dup" }) {
+        string label, value;
+        if (Ilia.PageFile.read_row(line, null, out label, out value))
+            shown += label;
+    }
+    assert (string.joinv("|", shown) == "dup|dup| spaced |dup");
+
+    // Bytes that are not UTF-8 (Latin-1 é, a stray 0xff): the label is valid, the value is as printed
+    seen = new GenericSet<string>(str_hash, str_equal);
+    string latin1 = from_bytes({ 'c', 'a', 'f', 0xe9 });
+    string label, value;
+    assert (Ilia.PageFile.read_row(latin1, seen, out label, out value));
+    assert (label.validate() && label == "caf�");
+    assert (value == latin1 && !value.validate());
+    assert (!Ilia.PageFile.read_row(latin1, seen, out label, out value));
+    // Shown alike, but other values: both are rows
+    string other = from_bytes({ 'c', 'a', 'f', 0xff });
+    assert (Ilia.PageFile.read_row(other, seen, out label, out value));
+    assert (label == "caf�" && value == other);
+    // Folding for the filter reads the label as it is shown
+    assert (Ilia.fold_text(label) == "caf�");
+}
+
+// The launch history stores UTF-8 only: a value that is not UTF-8 is recorded with U+FFFD
+void test_history_key() {
+    assert (Ilia.PageFile.history_key("Hosts", "gamma.example") == "hosts#gamma.example");
+    string latin1 = from_bytes({ 'c', 'a', 'f', 0xe9 });
+    string key = Ilia.PageFile.history_key("Bytes", latin1);
+    assert (key.validate() && key == "bytes#caf�");
+    // GSettings takes it (an invalid string here made set_strv() crash ilia)
+    var history = Ilia.append_launch_history({ "a.desktop" }, key, Ilia.LAUNCH_HISTORY_MAX_LEN);
+    assert (new Variant.strv(history).is_normal_form());
+}
+
+string[] split_words(string command_line) {
+    try {
+        string[] argv;
+        Shell.parse_argv(command_line, out argv);
+        return argv;
+    } catch (ShellError e) {
+        error("%s", e.message);
+    }
 }
 
 void test_expand_exec() {
-    string[] argv;
-    Shell.parse_argv("ssh -t %s 'echo %s done' 100%% %d --x=%s%%", out argv);
+    string[] argv = split_words("ssh -t %s 'echo %s done' 100%% %d --x=%s%%");
     string value = "a b; $(rm -rf ~) `x` \"q\" 'r'";
     var expanded = Ilia.PageFile.expand_exec(argv, value);
     assert (expanded.length == 7);
@@ -140,7 +217,7 @@ void test_expand_exec() {
     assert (expanded[6] == "--x=" + value + "%");
 
     // Without %s the value is the last argument; %%s is a literal %s, a trailing % stays
-    Shell.parse_argv("notify-send %%s 50%", out argv);
+    argv = split_words("notify-send %%s 50%");
     expanded = Ilia.PageFile.expand_exec(argv, "v");
     assert (string.joinv("|", expanded) == "notify-send|%s|50%|v");
 }
@@ -213,6 +290,8 @@ public int main(string[] args) {
     Test.add_func("/pagefile/parse", test_parse);
     Test.add_func("/pagefile/unusable", test_unusable);
     Test.add_func("/pagefile/split_row", test_split_row);
+    Test.add_func("/pagefile/read_row", test_read_row);
+    Test.add_func("/pagefile/history_key", test_history_key);
     Test.add_func("/pagefile/expand_exec", test_expand_exec);
     Test.add_func("/pagefile/load_all", test_load_all);
     Test.add_func("/pagefile/tab_order", test_tab_order);

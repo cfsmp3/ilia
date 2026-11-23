@@ -11,9 +11,22 @@ namespace Ilia {
      *
      * With Sort=frequency the rows chosen most often come first, the others keep their order,
      * and each choice is recorded in the launch history as <page id>#<value>.
+     *
+     * Rows are read with PageFile.read_row(): blank rows, and rows an ItemsCommand repeats, are
+     * left out (Items are shown as written, repeats included), and a
+     * label that is not UTF-8 is shown with U+FFFD; the value is used as it was printed.
+     *
+     * What a command can cost is bounded: ilia reads at most MAX_COMMAND_LINES lines and
+     * MAX_COMMAND_BYTES bytes of its output, and leaves out lines longer than
+     * MAX_LINE_LENGTH bytes. When a limit is reached the command is stopped. Limits reached,
+     * and a command that fails, are reported on stderr.
      */
     class PageFileTextPage : PageFilePage {
         private const int ITEM_VIEW_COLUMN_ICON = 0;
+
+        public const uint MAX_COMMAND_LINES = 1000000;
+        public const uint64 MAX_COMMAND_BYTES = 64 * 1024 * 1024;
+        public const size_t MAX_LINE_LENGTH = 64 * 1024;
 
         // The widget to display the rows
         private Gtk.TreeView item_view;
@@ -36,11 +49,17 @@ namespace Ilia {
         // Sort=frequency: how often each row was chosen, and how often each value was
         private int[] counts = {};
         private HashTable<string, int> value_counts;
+        // The rows an ItemsCommand printed so far, for PageFile.read_row(), which leaves out repeats
+        private GenericSet<string> rows_seen = new GenericSet<string>(str_hash, str_equal);
         // The ItemsCommand was started, or the Items were added
         private bool rows_requested = false;
         // The ItemsCommand while it may still run; it leads a process group of its own
         private Subprocess ? command = null;
         private int command_pid = 0;
+        // Reads the output of the ItemsCommand
+        private LineReader ? reader = null;
+        // ilia stopped the command (a limit, or the page went away): how it ends is not reported
+        private bool command_stopped = false;
         // A row was chosen, or the view is gone: nothing more is done
         private bool closed = false;
 
@@ -156,18 +175,56 @@ namespace Ilia {
                 // The rows that arrived stay, however the command ended
                 try {
                     command.wait_async.end(res);
+                    if (!command_stopped)
+                        report_failure(command);
                 } catch (GLib.Error e) {
                     debug("ItemsCommand of %s: %s", file.path, e.message);
                 }
                 command = null;
             });
 
-            var reader = new LineReader(command.get_stdout_pipe());
+            reader = new LineReader(command.get_stdout_pipe());
+            reader.max_lines = MAX_COMMAND_LINES;
+            reader.max_bytes = MAX_COMMAND_BYTES;
+            reader.max_line_length = MAX_LINE_LENGTH;
+            // A command that prints faster than the rows are added must not hold up drawing, filtering and keys
+            reader.io_priority = Priority.LOW;
             reader.lines_read.connect(add_rows);
+            reader.long_line_dropped.connect(on_long_line);
+            reader.finished.connect(on_output_read);
             reader.read_all.begin();
         }
 
+        // Said once, when the first line is left out: the command may go on running
+        private void on_long_line() {
+            if (reader.long_lines == 1)
+                stderr.printf("ilia: page file '%s': ItemsCommand printed a line longer than %s, leaving out such lines\n",
+                              file.path, format_size(MAX_LINE_LENGTH, FormatSizeFlags.IEC_UNITS));
+        }
+
+        // The output was read to its end, or to a limit
+        private void on_output_read() {
+            if (closed)
+                return;
+            if (reader.limit_reached) {
+                stderr.printf("ilia: page file '%s': ItemsCommand printed more than %u lines or %s, the rest is left out and the command is stopped\n",
+                              file.path, MAX_COMMAND_LINES, format_size(MAX_COMMAND_BYTES, FormatSizeFlags.IEC_UNITS));
+                stop_command();
+            }
+        }
+
+        // Report a command that exited with a status other than 0, or was killed
+        private void report_failure(Subprocess process) {
+            if (process.get_if_signaled())
+                stderr.printf("ilia: page file '%s': ItemsCommand was killed by signal %d\n", file.path, process.get_term_sig());
+            else if (process.get_if_exited() && process.get_exit_status() != 0)
+                stderr.printf("ilia: page file '%s': ItemsCommand exited with status %d\n", file.path, process.get_exit_status());
+        }
+
         private void stop_command() {
+            command_stopped = true;
+            if (reader != null)
+                reader.stop();
             if (command_pid == 0)
                 return;
             // Also what the command started, which may outlive the shell
@@ -179,7 +236,7 @@ namespace Ilia {
 
         // The key the choices of a row are recorded under in the launch history
         private string history_key(string value) {
-            return file.id.ascii_down() + "#" + value;
+            return PageFile.history_key(file.id, value);
         }
 
         // How often each value of this page was chosen, from the launch history
@@ -205,7 +262,7 @@ namespace Ilia {
 
             foreach (unowned string line in lines) {
                 string label, value;
-                if (!PageFile.split_row(line, out label, out value))
+                if (!PageFile.read_row(line, file.source == PageSource.COMMAND ? rows_seen : null, out label, out value))
                     continue;
                 if (!file.sort_by_frequency) {
                     labels += label;
@@ -214,7 +271,7 @@ namespace Ilia {
                 }
 
                 // After the rows chosen as often or more often, which come in the order they arrived
-                int count = value_counts.get(value);
+                int count = value_counts.get(PageFile.valid_text(value));
                 int position = insertion_point(count);
                 if (position < labels.length)
                     reordered = true;

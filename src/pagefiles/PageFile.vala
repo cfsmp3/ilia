@@ -336,19 +336,69 @@ namespace Ilia {
          * Divide a row of Items or ItemsCommand at its first tab into the label, which is
          * shown and searched, and the value, which choosing the row acts on
          *
-         * A row without a tab, or with nothing on one side of it, uses the same text for both.
+         * A row without a tab, or with only blank space on one side of it, uses the same text
+         * for both.
          *
-         * @return false if the row has no text besides the tab, and is not shown
+         * @return false if the row is blank besides the tab, and is not shown
          */
         public static bool split_row(string row, out string label, out string value) {
             int tab = row.index_of_char('\t');
             label = tab < 0 ? row : row.substring(0, tab);
             value = tab < 0 ? row : row.substring(tab + 1);
-            if (label == "")
+            if (is_blank(label))
                 label = value;
-            else if (value == "")
+            else if (is_blank(value))
                 value = label;
-            return label != "";
+            return !is_blank(label);
+        }
+
+        // Empty, or only ASCII blank space
+        private static bool is_blank(string text) {
+            for (int i = 0; i < text.length; ++i) {
+                if (!text[i].isspace())
+                    return false;
+            }
+            return true;
+        }
+
+        /**
+         * Read a line of Items or ItemsCommand as a row (see split_row()), unless it is blank
+         * or, when seen is given, repeats a row already in it, label and value alike
+         *
+         * The label, which is shown and searched, is made valid UTF-8: invalid bytes become
+         * U+FFFD. The value is kept as it is, for Exec or to be printed.
+         *
+         * @param seen The rows read so far, to leave out repeats, and the row is added to it;
+         *             null to keep repeats (Items are shown as written)
+         * @return false if the row is left out
+         */
+        public static bool read_row(string line, GenericSet<string> ? seen, out string label, out string value) {
+            if (!split_row(line, out label, out value))
+                return false;
+            label = valid_text(label);
+            if (seen == null)
+                return true;
+            // The label's length keeps the key of "a" + "bc" apart from that of "ab" + "c"
+            string key = "%d:%s%s".printf(label.length, label, value);
+            if (key in seen)
+                return false;
+            seen.add(key);
+            return true;
+        }
+
+        /**
+         * The text, with U+FFFD in place of each sequence of bytes that is not valid UTF-8
+         */
+        public static string valid_text(string text) {
+            return text.validate() ? text : text.make_valid();
+        }
+
+        /**
+         * The key a choice of a row is recorded under in the launch history: the page name in
+         * lower case, '#' and the value, made valid UTF-8 as the setting requires
+         */
+        public static string history_key(string page_id, string value) {
+            return page_id.ascii_down() + "#" + valid_text(value);
         }
 
         /**

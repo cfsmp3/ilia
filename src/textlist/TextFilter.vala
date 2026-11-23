@@ -4,16 +4,42 @@ namespace Ilia {
      *
      * Lines end at '\n', which is removed; a last line without '\n' is kept, as
      * FileStream.read_line() does.
+     *
+     * Limits, all off by default, bound what an endless or huge stream costs: lines longer
+     * than max_line_length are left out (counted in long_lines), and reading stops after
+     * max_lines lines or max_bytes bytes (limit_reached is then true). A line cut off by
+     * max_bytes or by stop() is left out too.
      */
     public class LineReader : GLib.Object {
         public signal void lines_read(string[] lines);
         public signal void finished();
+        // A line was left out for being longer than max_line_length
+        public signal void long_line_dropped();
 
         public bool done { get; private set; default = false; }
+
+        // Bytes in a line, without its '\n'; longer lines are left out. 0: no limit
+        public size_t max_line_length { get; set; default = 0; }
+        // Lines read, those left out included, before reading stops. 0: no limit
+        public uint max_lines { get; set; default = 0; }
+        // Bytes read before reading stops. 0: no limit
+        public uint64 max_bytes { get; set; default = 0; }
+        // The priority of the reads: below the idle priority, the window redraws and filters between reads
+        public int io_priority { get; set; default = Priority.DEFAULT; }
+
+        // Lines left out because they were longer than max_line_length
+        public uint long_lines { get; private set; default = 0; }
+        // Reading stopped at max_lines or max_bytes, before the end of the stream
+        public bool limit_reached { get; private set; default = false; }
 
         private InputStream stream;
         private size_t chunk_size;
         private ByteArray incomplete = new ByteArray();
+        // The line being read is too long: its bytes are dropped until its end
+        private bool skipping = false;
+        private uint line_count = 0;
+        private uint64 byte_count = 0;
+        private Cancellable cancellable = new Cancellable();
         private static uint8[] NUL = { 0 };
 
         public LineReader (InputStream stream, size_t chunk_size = 64 * 1024) {
@@ -21,22 +47,40 @@ namespace Ilia {
             this.chunk_size = chunk_size;
         }
 
+        /**
+         * Stop reading: no more lines are given, and finished is emitted
+         */
+        public void stop() {
+            cancellable.cancel();
+        }
+
         public async void read_all() {
             try {
-                while (true) {
-                    var bytes = yield stream.read_bytes_async(chunk_size, Priority.DEFAULT, null);
+                while (!cancellable.is_cancelled()) {
+                    var bytes = yield stream.read_bytes_async(chunk_size, io_priority, cancellable);
 
                     if (bytes.get_size() == 0) break;
-                    split(bytes.get_data());
+                    unowned uint8[] data = bytes.get_data();
+                    int length = data.length;
+                    if (max_bytes > 0 && byte_count + length > max_bytes) {
+                        length = (int) (max_bytes - byte_count);
+                        limit_reached = true;
+                    }
+                    byte_count += length;
+                    split(data[0 : length]);
+                    if (limit_reached)
+                        stop();
                 }
+            } catch (IOError.CANCELLED e) {
             } catch (GLib.Error e) {
                 stderr.printf("Error reading input: %s\n", e.message);
             }
 
-            if (incomplete.len > 0) {
-                incomplete.append(NUL);
-                string[] last = { (string) incomplete.data };
-                lines_read(last);
+            // A last line without '\n' counts, unless reading stopped in the middle of it
+            if (!cancellable.is_cancelled() && (incomplete.len > 0 || skipping)) {
+                string ? last = end_line();
+                if (last != null)
+                    lines_read({ last });
             }
             done = true;
             finished();
@@ -46,19 +90,54 @@ namespace Ilia {
             string[] lines = {};
             int start = 0;
 
-            for (int i = 0; i < data.length; ++i) {
+            for (int i = 0; i < data.length && !cancellable.is_cancelled(); ++i) {
                 if (data[i] != '\n') continue;
 
-                incomplete.append(data[start: i]);
-                incomplete.append(NUL);
-                lines += (string) incomplete.data;
-                incomplete.set_size(0);
+                add_to_line(data[start: i]);
+                string ? line = end_line();
+                if (line != null)
+                    lines += line;
                 start = i + 1;
             }
-            incomplete.append(data[start: data.length]);
+            if (!cancellable.is_cancelled())
+                add_to_line(data[start: data.length]);
 
             if (lines.length > 0)
                 lines_read(lines);
+        }
+
+        private void add_to_line(uint8[] data) {
+            if (skipping)
+                return;
+            if (max_line_length > 0 && incomplete.len + data.length > max_line_length) {
+                // Known as soon as the line is too long, though it may never end
+                skipping = true;
+                incomplete.set_size(0);
+                long_lines++;
+                long_line_dropped();
+                return;
+            }
+            incomplete.append(data);
+        }
+
+        // The line read so far is complete: the line, or null if it is left out for its length
+        private string ? end_line() {
+            // A line past max_lines: reading stops
+            if (max_lines > 0 && line_count >= max_lines) {
+                limit_reached = true;
+                stop();
+                return null;
+            }
+            line_count++;
+
+            string ? line = null;
+            if (!skipping) {
+                incomplete.append(NUL);
+                line = (string) incomplete.data;
+            }
+            skipping = false;
+            incomplete.set_size(0);
+            return line;
         }
     }
 
