@@ -162,6 +162,46 @@ namespace Ilia {
             return pages.data;
         }
 
+        /**
+         * The order of the tabs that -a shows before the help page: alphabetical by name, as the
+         * locale sorts text, without regard to case; built-in pages and pages from files alike
+         *
+         * Of two tabs with the same name the built-in one comes first; otherwise they keep the
+         * order they are given in.
+         *
+         * @param names The plain-text names of the tabs
+         * @param builtin For each tab, true if it is a built-in page
+         * @return The indices into names, in tab order
+         */
+        public static int[] tab_order(string[] names, bool[] builtin) {
+            string[] keys = new string[names.length];
+            int[] order = new int[names.length];
+            for (int i = 0; i < names.length; ++i) {
+                keys[i] = names[i].casefold().collate_key();
+                order[i] = i;
+            }
+
+            // Insertion sort: stable, and there are only a few tabs
+            for (int i = 1; i < order.length; ++i) {
+                int current = order[i];
+                int j = i - 1;
+                while (j >= 0 && tab_comes_after(keys, builtin, order[j], current)) {
+                    order[j + 1] = order[j];
+                    --j;
+                }
+                order[j + 1] = current;
+            }
+            return order;
+        }
+
+        // True if tab a goes after tab b
+        private static bool tab_comes_after(string[] keys, bool[] builtin, int a, int b) {
+            int by_name = strcmp(keys[a], keys[b]);
+            if (by_name != 0)
+                return by_name > 0;
+            return !builtin[a] && builtin[b];
+        }
+
         // The names of the page files directly in dir, in byte order; none if it cannot be read
         private static string[] list_page_files(string dir_path) {
             var names = new GenericArray<string>();

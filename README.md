@@ -53,7 +53,8 @@ More pages can be defined in key files, without changing Ilia: a file `<name>.pa
 The directories are `$XDG_CONFIG_HOME/ilia/pages` (`~/.config/ilia/pages`), then `ilia/pages` in each directory of `$XDG_CONFIG_DIRS` (`/etc/xdg/ilia/pages`).
 When several files define the same page, the first one found is used: the user's file hides the shared ones.
 `<name>` may hold ASCII letters, digits, `-` and `_`, and cannot be the name of a built-in page; names are matched without regard to case.
-A page is opened with `ilia -p <name>`, and `ilia -a` shows the pages from files after the built-in ones, ordered by file name.
+A page is opened with `ilia -p <name>`.
+`ilia -a` shows its pages in alphabetical order of their names, built-in pages and pages from files alike, and Help last.
 
 ```
 [Ilia Page]
@@ -78,7 +79,7 @@ The keys of the `[Ilia Page]` group:
 
 - `Name` (required): the label of the page's tab, as plain text.
 - `Icon`: the icon of the tab and of the rows (`applications-other` by default).
-- `Key`: a letter that selects the page with Alt when all pages are shown; a letter another page already uses is ignored.
+- `Key`: a letter that selects the page with Alt when all pages are shown. A letter that a built-in page uses, or a page whose tab comes earlier, is ignored with a warning; a page with `Key=h` takes Alt+H from Help.
 - Exactly one of:
   - `Apps`: desktop file IDs, listed in the order given. Choosing one launches it as the Applications page does; entries that are not installed or not shown on this desktop are left out.
   - `Items`: lines of text, separated by `;`.

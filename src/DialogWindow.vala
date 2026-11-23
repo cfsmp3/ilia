@@ -431,7 +431,7 @@ namespace Ilia {
             }
         }
 
-        // The built-in pages that -a shows, in their order
+        // The built-in pages that -a shows; their tabs are ordered by name along with those of the page files
         private const string[] ALL_PAGES_BUILTIN = { "apps", "terminal", "notifications", "keybindings", "windows", "tracker" };
 
         // The keybindings and windows pages need i3 or sway; the other built-in pages work under any window manager
@@ -510,29 +510,45 @@ namespace Ilia {
 
         /**
          * Creates pages for all generally usable pages: the built-in ones that work under the
-         * window manager, then those from page files that are shown under it, by file name
+         * window manager and those from page files that are shown under it, in alphabetical
+         * order of their names (see PageFile.tab_order()); the help page comes after them
+         *
+         * Built-in pages keep their letters. A page file's Key is ignored when a built-in page
+         * or a page whose tab comes earlier already uses the letter.
          */
         private int create_all_pages(HashTable<string, string ?> arg_map, string focus_page, ref uint start_page) {
             DialogPage[] pages = {};
             string[] page_ids = {};
-            // The letters of the pages so far: the first page to claim a letter keeps it
+            string[] names = {};
+            bool[] builtin = {};
+            // The letters taken so far: those of the built-in pages, then of the page files in tab order
             string used_keys = "";
 
             foreach (unowned string page_id in ALL_PAGES_BUILTIN) {
                 if (!is_builtin_page_shown(page_id))
                     continue;
-                var page = begin_page(new_builtin_page(page_id), arg_map);
+                var page = new_builtin_page(page_id);
                 pages += page;
                 page_ids += page_id;
+                names += HelpPage.plain_page_name(page.get_name());
+                builtin += true;
                 used_keys += page.get_keybinding().to_string();
             }
 
             bool focus_exists = PageFile.is_builtin_page(focus_page);
+            PageFile[] files = {};
+            string[] file_names = {};
             foreach (var file in PageFile.load_all()) {
                 focus_exists = focus_exists || file.id.ascii_down() == focus_page.ascii_down();
                 if (!file.is_shown_under(wm_name))
                     continue;
+                files += file;
+                file_names += file.name;
+            }
 
+            // The page files claim their letters in the order their tabs are shown
+            foreach (int index in PageFile.tab_order(file_names, new bool[file_names.length])) {
+                var file = files[index];
                 char key = file.key;
                 if (key != 0 && used_keys.index_of_char(key) >= 0) {
                     stderr.printf("ilia: page file '%s': the letter of Key '%c' is already used by another page, ignoring it\n", file.path, key);
@@ -541,22 +557,27 @@ namespace Ilia {
                 if (key != 0)
                     used_keys += key.to_string();
 
-                pages += begin_page(new_file_page(file, key), arg_map);
+                pages += new_file_page(file, key);
                 page_ids += file.id.ascii_down();
+                names += file.name;
+                builtin += false;
             }
-            // last page, help, will be initialized later in init
-            dialog_pages = pages;
 
-            // Start on the page asked for, if it is shown
+            // last page, help, will be initialized later in init
+            DialogPage[] ordered = {};
             start_page = 0;
-            for (int i = 0; i < page_ids.length; ++i) {
-                if (page_ids[i] == focus_page.down())
-                    start_page = i;
+            foreach (int index in PageFile.tab_order(names, builtin)) {
+                // Start on the page asked for, if it is shown
+                if (page_ids[index] == focus_page.down())
+                    start_page = ordered.length;
+                ordered += begin_page(pages[index], arg_map);
             }
+            dialog_pages = ordered;
+
             if (!focus_exists)
                 stderr.printf("Unknown page type: %s\n", focus_page);
 
-            return pages.length;
+            return ordered.length;
         }
 
         // Resize the dialog, bigger or smaller

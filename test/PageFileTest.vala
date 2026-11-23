@@ -174,6 +174,28 @@ void test_load_all() {
     assert (string.joinv("|", names) == "Alpha=Alpha|Dup=Dup upper|Hosts=User hosts|zeta=Zeta");
 }
 
+// The tabs of -a: built-in pages and pages from files in one alphabetical order
+void test_tab_order() {
+    string[] names = { "Applications", "Commands", "Notifications", "Keybindings", "Windows", "Files",
+                       "Hosts", "favourites", "Zeta", "Commands", "hosts" };
+    bool[] builtin = { true, true, true, true, true, true, false, false, false, false, false };
+
+    string[] ordered = {};
+    foreach (int index in Ilia.PageFile.tab_order(names, builtin))
+        ordered += names[index] + (builtin[index] ? "" : "*");
+    // Case is ignored; with the same name the built-in page comes first, then the pages in the order given
+    assert (string.joinv("|", ordered) == "Applications|Commands|Commands*|favourites*|Files|Hosts*|hosts*|Keybindings|Notifications|Windows|Zeta*");
+
+    // Only built-in pages: their tabs are in alphabetical order too
+    ordered = {};
+    string[] builtin_names = names[0 : 6];
+    foreach (int index in Ilia.PageFile.tab_order(builtin_names, builtin[0 : 6]))
+        ordered += builtin_names[index];
+    assert (string.joinv("|", ordered) == "Applications|Commands|Files|Keybindings|Notifications|Windows");
+
+    assert (Ilia.PageFile.tab_order({}, {}).length == 0);
+}
+
 public int main(string[] args) {
     try {
         config_root = DirUtils.make_tmp("ilia-page-file-test-XXXXXX");
@@ -193,6 +215,7 @@ public int main(string[] args) {
     Test.add_func("/pagefile/split_row", test_split_row);
     Test.add_func("/pagefile/expand_exec", test_expand_exec);
     Test.add_func("/pagefile/load_all", test_load_all);
+    Test.add_func("/pagefile/tab_order", test_tab_order);
 
     return Test.run();
 }
