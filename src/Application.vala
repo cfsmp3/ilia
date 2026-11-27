@@ -237,7 +237,7 @@ namespace Ilia {
             stdout.printf("\t\t-n: no icon\n");
             stdout.printf("\t'windows' - navigate to a window\n");
             stdout.printf("\t'tracker' - search for files by content\n");
-            stdout.printf("\t'features' - install or remove optional Regolith features\n");
+            stdout.printf("\t'features' - list optional Regolith features; Enter installs or removes one with apt in a terminal\n");
             Process.exit(0);
         }
 

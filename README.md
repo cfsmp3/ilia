@@ -74,7 +74,7 @@ This page communicates with the [Rofication](https://github.com/regolith-linux/r
 
 ### Features
 
-This page lists Regolith's optional packages for the running session (looks, i3xrocks bar blocks, compositors and window manager extensions), marks the installed ones, and installs or removes the selected one through PackageKit. PackageKit first reports what the change would do: when other packages would be removed, the page asks for confirmation. When PackageKit asks for authorisation, ilia lets the authorisation window have the keyboard and stays open until the change ends. Escape cancels a running change where PackageKit allows it. Filtering on this page matches the typed text within package names and summaries, ignoring case.
+This page lists Regolith's optional packages for the running session (looks, i3xrocks bar blocks, compositors and window manager extensions), as PackageKit reports them, and marks the installed ones. Enter opens a terminal (`x-terminal-emulator`) running `sudo apt install` for the selected package, or `sudo apt remove` if it is installed, and ilia closes as after any launch: apt lists everything the change would install and remove, and asks before going ahead. The terminal stays open until Enter, so the outcome can be read. Filtering on this page matches the typed text within package names and summaries, ignoring case.
 
 ### Keybindings
 

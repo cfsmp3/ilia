@@ -51,8 +51,6 @@ namespace Ilia {
         private Gtk.Grid grid;
         // Controls access to keyboard and mouse
         protected Gdk.Seat seat;
-        // True while a page lets other windows have the keyboard and pointer
-        private bool input_shared = false;
 
         // The last page: describes the page shown before it
         private HelpPage help_page;
@@ -114,9 +112,6 @@ namespace Ilia {
                 // Removing the seat's last keyboard (one wtype run, a virtual or Bluetooth keyboard going away) also
                 // takes keyboard focus on Wayland, though it went nowhere; the next keyboard to appear focuses ilia again
                 if (is_wayland && !seat_has_keyboard())
-                    return false;
-                // A page waiting for an answer or a change stays: the change may ask for authorisation in its own window
-                if (page_keeps_open())
                     return false;
                 quit();
                 return false;
@@ -234,9 +229,8 @@ namespace Ilia {
 
                 bool key_handled = false;
                 switch (key.keyval) {
-                        case KEY_CODE_ESCAPE: // Explicit exit, unless the page has something to cancel
-                            if (!dialog_pages[active_page].cancel())
-                                quit();
+                        case KEY_CODE_ESCAPE: // Explicit exit
+                            quit();
                             break;
                         case KEY_CODE_SUPER:
                         case KEY_CODE_SUPER_R: // Explicit exit, unless Super is pressed to complete a held layout-switch shortcut
@@ -383,14 +377,6 @@ namespace Ilia {
         private bool seat_has_keyboard() {
             var default_seat = get_display().get_default_seat();
             return default_seat != null && default_seat.get_slaves(Gdk.SeatCapabilities.KEYBOARD).length() > 0;
-        }
-
-        private bool page_keeps_open() {
-            for (int i = 0; i < total_pages; ++i) {
-                if (dialog_pages[i] != null && dialog_pages[i].keeps_open())
-                    return true;
-            }
-            return false;
         }
 
         public void set_seat(Gdk.Seat seat) {
@@ -659,26 +645,6 @@ namespace Ilia {
         public void quit() {
             release_input();
             close();
-        }
-
-        public void share_input(bool shared) {
-            if (shared == input_shared)
-                return;
-            input_shared = shared;
-
-            if (is_wayland) {
-                // An exclusive overlay keeps the keyboard from every other window
-                GtkLayerShell.set_keyboard_mode(this, shared ? GtkLayerShell.KeyboardMode.ON_DEMAND : GtkLayerShell.KeyboardMode.EXCLUSIVE);
-                return;
-            }
-
-            // No seat once ilia has let go of the inputs for good
-            if (seat == null)
-                return;
-            if (shared)
-                seat.ungrab();
-            else if (seat.grab(get_window(), Gdk.SeatCapabilities.KEYBOARD | Gdk.SeatCapabilities.POINTER, true, null, null, null) != Gdk.GrabStatus.SUCCESS)
-                stderr.printf("Unable to grab the keyboard and pointer again\n");
         }
     }
 }
