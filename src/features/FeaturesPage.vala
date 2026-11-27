@@ -30,8 +30,6 @@ namespace Ilia {
         // View on model of filtered elements
         private Gtk.TreeModelFilter filter;
         private Gtk.TreePath path;
-        // The confirmation question, or why there is nothing to list
-        private Gtk.Label message_label;
         private Gtk.Widget root_widget;
         private Gtk.Entry entry;
         private SessionContoller session_controller;
@@ -104,29 +102,13 @@ namespace Ilia {
             create_item_view();
             path = new Gtk.TreePath.first();
 
-            message_label = new Gtk.Label(null);
-            message_label.set_line_wrap(true);
-            message_label.xalign = 0;
-            // Shown only while there is something to say, also when the window shows all its widgets
-            message_label.no_show_all = true;
-
+            // Like every other page: the list and nothing else. Questions, progress and failures are shown in the
+            // row they are about, and the lack of a package service in a row of its own.
             var scrolled = new Gtk.ScrolledWindow(null, null);
+            scrolled.get_style_context().add_class("scrolled_window");
             scrolled.add(item_view);
             scrolled.expand = true;
-
-            // The heading and symbol of the tab, repeated on the page: GTK does not show tab labels to accessibility tools
-            var heading = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 5);
-            heading.pack_start(new Gtk.Image.from_icon_name(get_icon_name(), Gtk.IconSize.BUTTON), false, false, 0);
-            var heading_label = new Gtk.Label(null);
-            heading_label.set_markup(get_name());
-            heading_label.get_style_context().add_class("help_heading");
-            heading.pack_start(heading_label, false, false, 0);
-
-            var box = new Gtk.Box(Gtk.Orientation.VERTICAL, 5);
-            box.pack_start(heading, false, false, 0);
-            box.pack_start(message_label, false, false, 0);
-            box.pack_start(scrolled, true, true, 0);
-            root_widget = box;
+            root_widget = scrolled;
         }
 
         public Gtk.Widget get_root() {
@@ -136,6 +118,7 @@ namespace Ilia {
         // Initialize the view displaying selections
         private void create_item_view() {
             item_view = new Gtk.TreeView.with_model(filter);
+            item_view.get_style_context().add_class("item_view");
 
             // Do not show column headers
             item_view.headers_visible = false;
@@ -143,21 +126,37 @@ namespace Ilia {
             // Do not enable Gtk seearch
             item_view.enable_search = false;
 
+            // One line per package, as on the other pages: kind, name, summary, state
             item_view.insert_column_with_attributes(-1, "Kind", new CellRendererText(), "text", ITEM_VIEW_COLUMN_KIND);
-            // The summary goes under the name: in a column of its own, next to long package names, it gets no room
-            var package_renderer = new CellRendererText();
-            package_renderer.ellipsize = Pango.EllipsizeMode.END;
-            var package_column = new Gtk.TreeViewColumn();
-            package_column.title = "Package";
-            package_column.expand = true;
-            package_column.pack_start(package_renderer, true);
-            package_column.set_cell_data_func(package_renderer, (column, cell, m, iter) => {
+            item_view.insert_column_with_attributes(-1, "Name", new CellRendererText(), "text", ITEM_VIEW_COLUMN_NAME);
+            // The summary column also carries the question about its package, or why its change failed
+            var summary_renderer = new CellRendererText();
+            summary_renderer.ellipsize = Pango.EllipsizeMode.END;
+            var summary_column = new Gtk.TreeViewColumn();
+            summary_column.title = "Summary";
+            summary_column.expand = true;
+            summary_column.pack_start(summary_renderer, true);
+            summary_column.set_cell_data_func(summary_renderer, (column, cell, m, iter) => {
                 string name, summary;
                 m.@get(iter, ITEM_VIEW_COLUMN_NAME, out name, ITEM_VIEW_COLUMN_SUMMARY, out summary);
-                ((CellRendererText) cell).markup = "%s\n<small>%s</small>".printf(Markup.escape_text(name ?? ""), Markup.escape_text(summary ?? ""));
+                ((CellRendererText) cell).markup = detail_markup(name, summary);
             });
-            item_view.append_column(package_column);
-            item_view.insert_column_with_attributes(-1, "State", new CellRendererText(), "text", ITEM_VIEW_COLUMN_STATE);
+            item_view.append_column(summary_column);
+            var state_renderer = new CellRendererText();
+            state_renderer.weight = Pango.Weight.BOLD;
+            state_renderer.weight_set = false;
+            var state_column = new Gtk.TreeViewColumn();
+            state_column.title = "State";
+            state_column.pack_start(state_renderer, false);
+            state_column.set_cell_data_func(state_renderer, (column, cell, m, iter) => {
+                string name, state;
+                m.@get(iter, ITEM_VIEW_COLUMN_NAME, out name, ITEM_VIEW_COLUMN_STATE, out state);
+                var text_cell = (CellRendererText) cell;
+                text_cell.text = state ?? "";
+                // The question's row stands out
+                text_cell.weight_set = activity == Activity.PROMPT && name == target_name;
+            });
+            item_view.append_column(state_column);
 
             item_view.get_selection().set_mode(SelectionMode.SINGLE);
             item_view.row_activated.connect((row_path, column) => {
@@ -222,6 +221,8 @@ namespace Ilia {
         private bool filter_func(Gtk.TreeModel m, Gtk.TreeIter iter) {
             string name, summary;
             m.@get(iter, ITEM_VIEW_COLUMN_NAME, out name, ITEM_VIEW_COLUMN_SUMMARY, out summary);
+            if (!available)
+                return true;
             return FeatureCatalogue.matches(entry.get_text(), name ?? "", summary ?? "");
         }
 
@@ -288,7 +289,14 @@ namespace Ilia {
                     );
                 }
             }
-            update_message();
+            if (!available) {
+                // The placeholder row: nothing to select or act upon
+                Gtk.TreeIter iter;
+                model.append(out iter);
+                model.set(iter, ITEM_VIEW_COLUMN_KIND, "", ITEM_VIEW_COLUMN_NAME, "", ITEM_VIEW_COLUMN_SUMMARY, UNAVAILABLE_TEXT, ITEM_VIEW_COLUMN_STATE, "");
+                filter.refilter();
+                return;
+            }
 
             if (selected_name == null || !select_name(selected_name))
                 select_first_row(item_view, path);
@@ -318,13 +326,26 @@ namespace Ilia {
             return false;
         }
 
-        // The state column: the running transaction, the last failure, or whether the package is installed
+        // The state column: the question, the running transaction, the last failure, or whether the package is installed
         private string state_of(FeaturePackage package) {
+            if (activity == Activity.PROMPT && package.name == target_name)
+                return target_install ? "Install?" : "Remove?";
             if (activity == Activity.TRANSACTION && package.name == target_name)
                 return FeatureCatalogue.transaction_state(target_install, percentage);
             if (package.name == failed_name)
-                return "Failed: " + failed_details;
+                return "Failed";
             return package.installed ? "Installed" : "";
+        }
+
+        // The summary column: the question about the package, why its change failed, or its summary
+        private string detail_markup(string ? name, string ? summary) {
+            if (name != null && name == target_name && activity == Activity.PROMPT)
+                return "<b>%s</b>".printf(Markup.escape_text(prompt_text ?? ""));
+            if (name != null && name == failed_name)
+                return Markup.escape_text(failed_details ?? "");
+            if (!available)
+                return "<i>%s</i>".printf(Markup.escape_text(summary ?? ""));
+            return Markup.escape_text(summary ?? "");
         }
 
         private void update_states() {
@@ -338,22 +359,6 @@ namespace Ilia {
                 var package = packages.get(name);
                 if (package != null)
                     model.set(iter, ITEM_VIEW_COLUMN_STATE, state_of(package));
-            }
-        }
-
-        private void update_message() {
-            string ? text = null;
-            if (activity == Activity.PROMPT)
-                text = prompt_text;
-            else if (!available)
-                text = UNAVAILABLE_TEXT;
-
-            if (text != null) {
-                message_label.set_text(text);
-                message_label.show();
-            } else {
-                message_label.hide();
-                message_label.set_text("");
             }
         }
 
@@ -379,6 +384,14 @@ namespace Ilia {
                 default:
                     break;
             }
+        }
+
+        // The question in the row: what else the change takes away, and the keys that answer it
+        private string row_question(string[] removed) {
+            string keys = "Enter to confirm, Escape to cancel";
+            if (removed.length == 0)
+                return keys + ".";
+            return "%s %s. %s.".printf(target_install ? "Removes" : "Also removes", FeatureCatalogue.name_list(removed), keys);
         }
 
         private Pk.Bitfield transaction_flags(bool simulate) {
@@ -448,9 +461,10 @@ namespace Ilia {
                 return;
             }
 
-            prompt_text = target_install ? FeatureCatalogue.install_prompt(target_name, removed) : FeatureCatalogue.remove_prompt(target_name, removed);
+            prompt_text = row_question(removed);
             activity = Activity.PROMPT;
-            update_message();
+            update_states();
+            select_name(target_name);
         }
 
         // Install or remove the target package for real
@@ -458,7 +472,6 @@ namespace Ilia {
             begin_activity(Activity.TRANSACTION);
             update_input_sharing();
             prompt_text = null;
-            update_message();
             update_states();
 
             string ? details = null;
@@ -498,7 +511,6 @@ namespace Ilia {
             target_id = null;
             prompt_text = null;
             cancellable = null;
-            update_message();
             update_states();
         }
 
