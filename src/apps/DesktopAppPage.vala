@@ -3,11 +3,13 @@ using Gtk;
 namespace Ilia {
     class DesktopAppPage : DialogPage, GLib.Object {
         private static GLib.Timer app_timer;
-        private const int ITEM_VIEW_COLUMNS = 4;
+        private const int ITEM_VIEW_COLUMNS = 5;
         private const int ITEM_VIEW_COLUMN_ICON = 0;
         private const int ITEM_VIEW_COLUMN_NAME = 1;
         private const int ITEM_VIEW_COLUMN_MATCH = 2;
         private const int ITEM_VIEW_COLUMN_APPINFO = 3;
+        // The package name of an optional Regolith feature that is not installed; null in the rows of apps
+        private const int ITEM_VIEW_COLUMN_FEATURE = 4;
 
         // Number of past launches to store (to determine sort rank)
         private const uint HISTORY_MAX_LEN = 32;
@@ -63,6 +65,14 @@ namespace Ilia {
         private Gtk.Widget root_widget;
 
         private Gtk.TreePath path;
+
+        // Optional Regolith features that are not installed, listed after the apps. PackageKit is asked
+        // for them once the page is first shown.
+        private FeatureInstaller ? installer = null;
+        private bool features_requested = false;
+        // The rows of the features, by package name; a row whose package got installed is hidden
+        private Gee.HashMap<string, AppMatch> feature_matches = new Gee.HashMap<string, AppMatch>();
+        private Gdk.Pixbuf ? feature_icon = null;
 
         // The desktop files, enumerated on a worker thread started as early as possible so that
         // the parse overlaps with GTK's own startup (theme CSS, fontconfig). Handed to the main
@@ -143,7 +153,11 @@ namespace Ilia {
             hidden_apps = settings.get_strv("hidden-apps");
             match_fields = AppField.NAME | AppField.from_names(settings.get_strv("match-fields"));
 
-            model = new Gtk.ListStore(ITEM_VIEW_COLUMNS, typeof (Gdk.Pixbuf), typeof (string), typeof (AppMatch), typeof (DesktopAppInfo));
+            model = new Gtk.ListStore(ITEM_VIEW_COLUMNS, typeof (Gdk.Pixbuf), typeof (string), typeof (AppMatch), typeof (DesktopAppInfo), typeof (string));
+
+            installer = new FeatureInstaller(FeatureSession.from_wm_name(wm_name), sessionController, is_wayland);
+            installer.catalogue_changed.connect(show_features);
+            installer.state_changed.connect(redraw_features);
 
             filter = new Gtk.TreeModelFilter(model, null);
             filter.set_visible_func(filter_func);
@@ -212,8 +226,9 @@ namespace Ilia {
                 return;
 
             AppMatch match;
-            filter.@get(selected, ITEM_VIEW_COLUMN_MATCH, out match);
-            if (match == null)
+            string feature;
+            filter.@get(selected, ITEM_VIEW_COLUMN_MATCH, out match, ITEM_VIEW_COLUMN_FEATURE, out feature);
+            if (match == null || feature != null)
                 return;
             var position = filter.get_path(selected);
 
@@ -242,6 +257,10 @@ namespace Ilia {
         }
 
         public void show() {
+            if (!features_requested) {
+                features_requested = true;
+                installer.refresh_catalogue();
+            }
             item_view.grab_focus ();
             debug("DesktopAppPage ready to accept keystrokes (%.3f seconds since app start)", app_timer.elapsed());
         }
@@ -262,7 +281,22 @@ namespace Ilia {
             // Create columns
             if (icon_size > 0)
                 item_view.insert_column_with_attributes(-1, "Icon", new CellRendererPixbuf(), "pixbuf", ITEM_VIEW_COLUMN_ICON);
-            item_view.insert_column_with_attributes(-1, "Name", new CellRendererText(), "text", ITEM_VIEW_COLUMN_NAME);
+            var name_renderer = new CellRendererText();
+            name_renderer.ellipsize = Pango.EllipsizeMode.END;
+            var name_column = new Gtk.TreeViewColumn();
+            name_column.title = "Name";
+            name_column.sizing = Gtk.TreeViewColumnSizing.FIXED;
+            name_column.expand = true;
+            name_column.pack_start(name_renderer, true);
+            name_column.set_cell_data_func(name_renderer, (column, cell, m, row) => {
+                string name, feature;
+                m.@get(row, ITEM_VIEW_COLUMN_NAME, out name, ITEM_VIEW_COLUMN_FEATURE, out feature);
+                if (feature == null)
+                    ((CellRendererText) cell).text = name;
+                else
+                    ((CellRendererText) cell).markup = feature_markup(feature);
+            });
+            item_view.append_column(name_column);
 
             // Launch app on one click
             item_view.set_activate_on_single_click(true);
@@ -275,6 +309,107 @@ namespace Ilia {
         private void on_row_activated(Gtk.TreeView treeview, Gtk.TreePath row_path, Gtk.TreeViewColumn column) {
             filter.get_iter(out iter, row_path);
             execute_app(iter);
+        }
+
+        /**
+         * Escape discards the question about a feature, or cancels its install where PackageKit allows it
+         */
+        public bool cancel() {
+            return installer != null && installer.cancel();
+        }
+
+        // The install may ask for authorisation in a window of its own
+        public bool keeps_open() {
+            return installer != null && installer.activity != FeatureInstaller.Activity.IDLE;
+        }
+
+        // A feature row: the package and its summary, dimmed; the question, progress or failure while there is one
+        private string feature_markup(string name) {
+            var package = installer.get_package(name);
+            string summary = package != null ? package.summary : "";
+            if (name == installer.target_name) {
+                switch (installer.activity) {
+                    case FeatureInstaller.Activity.PROMPT:
+                        return "<b>%s</b>".printf(Markup.escape_text(installer.prompt_text ?? ""));
+                    case FeatureInstaller.Activity.TRIAL:
+                    case FeatureInstaller.Activity.TRANSACTION:
+                    case FeatureInstaller.Activity.REFRESHING:
+                        return "%s  <b>%s</b>".printf(Markup.escape_text(name), Markup.escape_text(FeatureCatalogue.transaction_state(true, installer.percentage)));
+                    default:
+                        break;
+                }
+            }
+            if (name == installer.failed_name)
+                return "%s  <b>Failed: %s</b>".printf(Markup.escape_text(name), Markup.escape_text(installer.failed_details ?? ""));
+            return "<span alpha=\"55%%\">%s  <small>%s</small></span>".printf(Markup.escape_text(name), Markup.escape_text(summary));
+        }
+
+        // Add a row for each feature that is not installed and has none yet; hide those that got installed
+        private void show_features() {
+            string ? selected_feature = null;
+            Gtk.TreeModel selected_model;
+            Gtk.TreeIter selected;
+            if (item_view.get_selection().get_selected(out selected_model, out selected))
+                selected_model.@get(selected, ITEM_VIEW_COLUMN_FEATURE, out selected_feature);
+
+            foreach (var package in installer.get_packages()) {
+                var existing = feature_matches.get(package.name);
+                if (existing != null) {
+                    existing.removed = package.installed;
+                    continue;
+                }
+                if (package.installed)
+                    continue;
+
+                var match = new AppMatch("feature:" + package.name, package.name, null, package.kind.to_label(), package.summary, match_fields);
+                if (ranked_text != null)
+                    match.rank(ranked_words, fuzzy_matching);
+                feature_matches.set(package.name, match);
+                Gtk.TreeIter row;
+                model.append(out row);
+                model.set(
+                    row,
+                    ITEM_VIEW_COLUMN_ICON, get_feature_icon(),
+                    ITEM_VIEW_COLUMN_NAME, package.name,
+                    ITEM_VIEW_COLUMN_MATCH, match,
+                    ITEM_VIEW_COLUMN_FEATURE, package.name
+                );
+            }
+            filter.refilter();
+            // The highlight stays on the app it was on; it moves to the first row if its feature got installed
+            if (selected_feature == null || feature_matches.get(selected_feature) == null || feature_matches.get(selected_feature).removed)
+                set_selection();
+        }
+
+        private void redraw_features() {
+            Gtk.TreeIter row;
+            for (bool next = model.get_iter_first(out row); next; next = model.iter_next(ref row)) {
+                string feature;
+                model.@get(row, ITEM_VIEW_COLUMN_FEATURE, out feature);
+                if (feature != null)
+                    model.row_changed(model.get_path(row), row);
+            }
+        }
+
+        // The package symbol, at half strength like the rest of a feature row
+        private Gdk.Pixbuf ? get_feature_icon() {
+            if (icon_size <= 0)
+                return null;
+            if (feature_icon == null) {
+                feature_icon = new Gdk.Pixbuf(Gdk.Colorspace.RGB, true, 8, icon_size, icon_size);
+                feature_icon.fill(0x00000000);
+                // Recent Adwaita only has the symbolic variant
+                foreach (unowned string icon_name in new string[] { "system-software-install", "system-software-install-symbolic" }) {
+                    try {
+                        var icon = Gtk.IconTheme.get_default().load_icon(icon_name, icon_size, Gtk.IconLookupFlags.FORCE_SIZE);
+                        icon.composite(feature_icon, 0, 0, icon_size, icon_size, 0, 0, 1, 1, Gdk.InterpType.BILINEAR, 128);
+                        break;
+                    } catch (GLib.Error e) {
+                        debug("No feature icon %s: %s", icon_name, e.message);
+                    }
+                }
+            }
+            return feature_icon;
         }
 
         // filter selection based on contents of Entry
@@ -326,6 +461,16 @@ namespace Ilia {
          */
         private int app_sort_func(TreeModel model, TreeIter a, TreeIter b) {
             rank_rows();
+
+            // Features come after all the apps, by name
+            string feature_a, feature_b;
+            model.@get(a, ITEM_VIEW_COLUMN_FEATURE, out feature_a);
+            model.@get(b, ITEM_VIEW_COLUMN_FEATURE, out feature_b);
+            if (feature_a != null || feature_b != null) {
+                if (feature_a != null && feature_b != null)
+                    return strcmp(feature_a, feature_b);
+                return feature_a != null ? 1 : -1;
+            }
 
             if (ranked_words.length > 0) {
                 AppMatch match_a;
@@ -471,6 +616,8 @@ namespace Ilia {
 
                 Value app_info_val;
                 model.get_value(iter, ITEM_VIEW_COLUMN_APPINFO, out app_info_val);
+                // Feature rows have their icon already
+                if (app_info_val.get_object() == null) continue;
                 var icon = ((DesktopAppInfo) app_info_val.get_object()).get_icon();
                 if (icon == null) continue;
 
@@ -504,6 +651,12 @@ namespace Ilia {
 
         // Launch a desktop app, at most once: a double click activates the row twice
         public void execute_app(Gtk.TreeIter selection) {
+            string feature;
+            filter.@get(selection, ITEM_VIEW_COLUMN_FEATURE, out feature);
+            if (feature != null) {
+                installer.activate(feature);
+                return;
+            }
             if (launching)
                 return;
             launching = true;

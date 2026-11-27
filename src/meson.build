@@ -46,7 +46,7 @@ ilia_sources += files([
     'help/HelpPage.vala',
     'commands/CommandPage.vala',
     'features/FeatureCatalogue.vala',
-    'features/FeaturesPage.vala',
+    'features/FeatureInstaller.vala',
     'keybindings/ConfigParser.vala',
     'keybindings/I3Ipc.vala',
     'keybindings/KeybindingsPage.vala',
